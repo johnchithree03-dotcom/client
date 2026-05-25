@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Phone, MessageCircle, MapPin, Star, Package, Home, Navigation } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -6,6 +6,8 @@ import { db } from '../config/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { getETA, calculateDistance } from '../utils/etaCalculation';
 import { RatingModal } from '../components/RatingModal';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
+import { listenToDriverLocation } from '../services/trackingService';
 
 interface OrderItem {
   name: string;
@@ -296,95 +298,86 @@ export const LiveTrackingPage: React.FC = () => {
     console.log('Open messaging');
   };
 
+  // Build map markers for store, destination, driver, and stops
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    
+    // Store marker
+    if (orderData.storeLocation?.lat && orderData.storeLocation?.lng) {
+      markers.push({
+        id: 'store',
+        type: 'store',
+        lat: orderData.storeLocation.lat,
+        lng: orderData.storeLocation.lng
+      });
+    }
+    
+    // Destination marker
+    if (orderData.destinationLocation?.lat && orderData.destinationLocation?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: orderData.destinationLocation.lat,
+        lng: orderData.destinationLocation.lng
+      });
+    }
+    
+    // Stop markers
+    const stops = orderData.stops || [];
+    stops.forEach((stop: any, index: number) => {
+      if (stop.lat && stop.lng) {
+        markers.push({
+          id: `stop-${index}`,
+          type: 'stop',
+          lat: stop.lat,
+          lng: stop.lng,
+          label: `${index + 1}`
+        });
+      }
+    });
+    
+    return markers;
+  }, [orderData.storeLocation, orderData.destinationLocation, orderData.stops]);
+
+  // Calculate arrival time from ETA string
+  const getArrivalTime = useCallback(() => {
+    if (!eta || eta === 'Calculating...') return null;
+    const match = eta.match(/(\d+)/);
+    if (match) {
+      const etaMinutes = parseInt(match[1]);
+      const now = new Date();
+      const arrivalDate = new Date(now.getTime() + etaMinutes * 60000);
+      return arrivalDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    }
+    return null;
+  }, [eta]);
+
+  // Extract ETA minutes
+  const getEtaMinutes = useCallback(() => {
+    if (!eta || eta === 'Calculating...') return undefined;
+    const match = eta.match(/(\d+)/);
+    return match ? parseInt(match[1]) : undefined;
+  }, [eta]);
+
   return (
     <div className="min-h-screen bg-gray-100 relative">
-      {/* Map Placeholder Background */}
-      <div className="absolute inset-0 bg-gradient-to-br from-amber-50 via-[#F3EEFF] to-blue-50">
-        {/* Map placeholder with roads pattern */}
-        <div className="absolute inset-0 opacity-40">
-          <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <pattern id="map-grid" width="100" height="100" patternUnits="userSpaceOnUse">
-                <path d="M 100 0 L 0 0 0 100" fill="none" stroke="#d1d5db" strokeWidth="1" />
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#map-grid)" />
-          </svg>
-        </div>
-
-        {/* Simulated roads */}
-        <div className="absolute inset-0">
-          <div className="absolute top-[30%] left-0 right-0 h-4 bg-amber-200/60 transform -rotate-3" />
-          <div className="absolute top-[50%] left-0 right-0 h-3 bg-amber-200/50 transform rotate-2" />
-          <div className="absolute top-[70%] left-0 right-0 h-4 bg-amber-200/60 transform -rotate-1" />
-          <div className="absolute top-0 bottom-0 left-[25%] w-3 bg-amber-200/50 transform rotate-2" />
-          <div className="absolute top-0 bottom-0 left-[60%] w-4 bg-amber-200/60 transform -rotate-1" />
-          {/* River/water feature */}
-          <div className="absolute top-[40%] left-[40%] w-32 h-64 bg-blue-200/40 rounded-full transform rotate-45" />
-        </div>
-
-        {/* Store Location Marker */}
-        <motion.div
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ delay: 0.3, type: 'spring' }}
-          className="absolute top-[35%] left-[20%] transform -translate-x-1/2 -translate-y-1/2"
-        >
-          <div className="relative">
-            <div className="w-12 h-12 bg-red-500 rounded-xl flex items-center justify-center shadow-lg">
-              <Package size={24} className="text-white" />
-            </div>
-            <div className="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[8px] border-r-[8px] border-t-[10px] border-l-transparent border-r-transparent border-t-red-500" />
-          </div>
-        </motion.div>
-
-        {/* Driver Location Marker (Car) */}
-        <motion.div
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ delay: 0.5, type: 'spring' }}
-          className="absolute top-[50%] left-[45%] transform -translate-x-1/2 -translate-y-1/2"
-        >
-          <motion.div
-            animate={{ y: [0, -5, 0] }}
-            transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
-            className="relative"
-          >
-            <div className="w-14 h-8 bg-white rounded-lg shadow-lg flex items-center justify-center">
-              <span className="text-2xl">🚗</span>
-            </div>
-          </motion.div>
-        </motion.div>
-
-        {/* Destination Location Marker (Home) */}
-        <motion.div
-          initial={{ scale: 0, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ delay: 0.7, type: 'spring' }}
-          className="absolute top-[55%] right-[15%] transform translate-x-1/2 -translate-y-1/2"
-        >
-          <div className="relative">
-            <div className="w-12 h-12 bg-[#5B2EFF] rounded-xl flex items-center justify-center shadow-lg">
-              <Home size={24} className="text-white" />
-            </div>
-            <div className="absolute -bottom-2 left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-[8px] border-r-[8px] border-t-[10px] border-l-transparent border-r-transparent border-t-[#5B2EFF]" />
-          </div>
-        </motion.div>
-
-        {/* Route line placeholder */}
-        <svg className="absolute inset-0 w-full h-full pointer-events-none">
-          <motion.path
-            initial={{ pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={{ duration: 1.5, ease: 'easeInOut' }}
-            d="M 20% 35% Q 35% 45%, 45% 50% T 85% 55%"
-            fill="none"
-            stroke="#5B2EFF"
-            strokeWidth="4"
-            strokeDasharray="8 8"
-            className="opacity-60"
-          />
-        </svg>
+      {/* Real MapLibre Map with live driver tracking */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={driverLocation 
+            ? { lat: driverLocation.lat, lng: driverLocation.lng }
+            : orderData.storeLocation?.lat && orderData.storeLocation?.lng 
+              ? { lat: orderData.storeLocation.lat, lng: orderData.storeLocation.lng } 
+              : { lat: -15.3875, lng: 28.3228 }}
+          zoom={14}
+          markers={mapMarkers}
+          driverPosition={driverLocation || undefined}
+          storePosition={orderData.storeLocation || undefined}
+          pickupEta={getEtaMinutes()}
+          arrivalTime={getArrivalTime() || undefined}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
       </div>
 
       {/* Top Status Panel */}

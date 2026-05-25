@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Plus, Clock, Navigation, Search, Loader2 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { MapBackground } from '../components/MapBackground';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import { ScrollableSection } from '../components/ScrollableSection';
 import { useGeolocation } from '../hooks/useGeolocation';
 import { 
@@ -383,9 +383,58 @@ export const YourRoute: React.FC<YourRouteProps> = ({ onRouteComplete }) => {
     </motion.div>
   );
 
+  // Build map markers for preview
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        id: 'pickup',
+        type: 'pickup',
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng
+      });
+    }
+    
+    if (destinationCoords?.lat && destinationCoords?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: destinationCoords.lat,
+        lng: destinationCoords.lng
+      });
+    }
+    
+    // Add stop markers
+    stopCoords.forEach((coords, index) => {
+      if (coords?.lat && coords?.lng) {
+        markers.push({
+          id: `stop-${index}`,
+          type: 'stop',
+          lat: coords.lat,
+          lng: coords.lng,
+          label: `${index + 1}`
+        });
+      }
+    });
+    
+    return markers;
+  }, [pickupCoords, destinationCoords, stopCoords]);
+
   return (
     <div className="min-h-screen relative overflow-hidden bg-gray-50">
-      <MapBackground />
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={geoLat && geoLng 
+            ? { lat: geoLat, lng: geoLng } 
+            : { lat: -15.3875, lng: 28.3228 }}
+          zoom={13}
+          markers={mapMarkers}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
+      </div>
       
       {/* Header */}
       <motion.div 

@@ -546,14 +546,23 @@ export function FoodiesRoute() {
               </motion.button>
             )}
 
-            {mockDeliveryAddresses.slice(0, 5).map((addr) => (
+            {addressSuggestions.slice(0, 5).map((addr) => (
               <motion.button
                 key={addr.id}
                 onClick={() => {
                   if (activeLocationInput === 'current-location') {
                     handleCurrentLocationSelect(addr.address);
+                    // Save coords
+                    setDeliveryCoords(addr.coords);
+                    saveRecentAddress(addr);
                   } else {
                     handleStopAddressSelect(activeLocationInput as string, addr.address, addr.description);
+                    // Save stop coords
+                    setStopCoords(prev => ({
+                      ...prev,
+                      [activeLocationInput as string]: addr.coords
+                    }));
+                    saveRecentAddress(addr);
                   }
                 }}
                 className="w-full flex items-center gap-3 p-3 bg-white rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
@@ -561,7 +570,7 @@ export function FoodiesRoute() {
               >
                 <Clock size={16} className="text-gray-400 flex-shrink-0" />
                 <div className="flex-1 text-left">
-                  <p className="font-medium text-gray-900 text-xs">{addr.name}</p>
+                  <p className="font-medium text-gray-900 text-xs">{addr.address.split(',')[0]}</p>
                   <p className="text-[10px] text-gray-500">{addr.description}</p>
                 </div>
               </motion.button>

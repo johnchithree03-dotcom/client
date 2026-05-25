@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence, PanInfo, useMotionValue, useSpring, useTransform } from 'framer-motion';
 import { X, Plus, Calendar, Users, User, Briefcase, ChevronDown, RefreshCw } from 'lucide-react';
 import { PromoDetailsPanel } from '../components/PromoDetailsPanel';
 import { useRideContext } from '../contexts/RideContext';
 import { apiPost } from '../config/api';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import {
   BackendRideOption,
   getVehicleConfig,
@@ -97,19 +98,23 @@ export const SelectRide: React.FC<SelectRideProps> = ({
     setIsLoading(true);
     setError('');
 
-    // Fallback coordinates near available drivers (Johannesburg area)
-    const fallbackPickup = { lat: -26.2371500, lng: 28.0305200 };
-    const fallbackDrop = { lat: -26.2400000, lng: 28.0400000 };
+    // REAL COORDINATES ONLY - no fallbacks
+    // Backend will reject if coordinates are missing
+    if (!pickupCoords?.lat || !pickupCoords?.lng || !destinationCoords?.lat || !destinationCoords?.lng) {
+      setError('Missing coordinates. Please select valid addresses.');
+      setIsLoading(false);
+      return;
+    }
 
     try {
       const payload: Record<string, unknown> = {
         pickup: navPickup || pickup,
         destination: navDestination || destination,
         stops: navStops.length > 0 ? navStops : stops,
-        pickupLat: pickupCoords?.lat ?? fallbackPickup.lat,
-        pickupLng: pickupCoords?.lng ?? fallbackPickup.lng,
-        dropLat: destinationCoords?.lat ?? fallbackDrop.lat,
-        dropLng: destinationCoords?.lng ?? fallbackDrop.lng
+        pickupLat: pickupCoords.lat,
+        pickupLng: pickupCoords.lng,
+        dropLat: destinationCoords.lat,
+        dropLng: destinationCoords.lng
       };
 
       // Service type payloads based on navigation state
@@ -366,46 +371,54 @@ export const SelectRide: React.FC<SelectRideProps> = ({
 
   const hasOptions = rideOptions.length > 0;
 
+  // Build map markers for pickup, destination, and stops
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        id: 'pickup',
+        type: 'pickup',
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng
+      });
+    }
+    
+    if (destinationCoords?.lat && destinationCoords?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: destinationCoords.lat,
+        lng: destinationCoords.lng
+      });
+    }
+    
+    return markers;
+  }, [pickupCoords, destinationCoords]);
+
+  // Calculate arrival time based on ETA
+  const getArrivalTime = useCallback(() => {
+    if (!selectedRide?.eta) return null;
+    const now = new Date();
+    const arrivalDate = new Date(now.getTime() + (selectedRide.eta + 15) * 60000);
+    return arrivalDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  }, [selectedRide]);
+
   return (
     <div className="fixed inset-0 bg-gray-100 overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-br from-blue-100 via-blue-50 to-[#5B2EFF]/10">
-        <div className="absolute inset-0 opacity-40">
-          <svg className="w-full h-full">
-            <defs>
-              <pattern id="map-grid" width="60" height="60" patternUnits="userSpaceOnUse">
-                <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#cbd5e1" strokeWidth="1"/>
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#map-grid)" />
-            <path
-              d="M 200 400 Q 250 300 300 200"
-              stroke="#4f46e5"
-              strokeWidth="4"
-              fill="none"
-              strokeLinecap="round"
-            />
-          </svg>
-        </div>
-
-        <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-          <div className="w-8 h-8 bg-[#5B2EFF] rounded-full border-4 border-white shadow-lg" />
-        </div>
-        <div className="absolute top-2/3 right-1/3">
-          <div className="w-6 h-6 bg-blue-500 rounded-full border-4 border-white shadow-lg" />
-        </div>
-
-        <motion.div
-          className="absolute top-32 left-1/2 transform -translate-x-1/2 bg-blue-600 text-white px-4 py-2 rounded-full shadow-lg text-sm font-semibold"
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          transition={{ delay: 0.3, type: 'spring' }}
-        >
-          {isLoading 
-            ? 'Finding drivers...'
-            : selectedRide?.enabled 
-              ? `Arrive in ~${selectedRide.eta + 15} min`
-              : 'Searching for drivers...'}
-        </motion.div>
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={pickupCoords?.lat && pickupCoords?.lng 
+            ? { lat: pickupCoords.lat, lng: pickupCoords.lng } 
+            : { lat: -15.3875, lng: 28.3228 }}
+          zoom={13}
+          markers={mapMarkers}
+          pickupEta={selectedRide?.enabled ? selectedRide.eta : undefined}
+          arrivalTime={selectedRide?.enabled ? getArrivalTime() || undefined : undefined}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
       </div>
 
       <motion.div

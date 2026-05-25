@@ -4,6 +4,7 @@ import { motion, PanInfo, AnimatePresence, useMotionValue, useSpring, useTransfo
 import { X, Plus, Calendar, User, Briefcase, ChevronDown, RefreshCw, Users } from 'lucide-react';
 import { useGlobalCart } from '../contexts/GlobalCartContext';
 import { apiPost } from '../config/api';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import {
   BackendRideOption,
   getVehicleConfig,
@@ -125,13 +126,17 @@ export function FoodDelivery() {
     setIsLoading(true);
     setError('');
 
-    // Fallback coordinates (Johannesburg area)
-    const fallbackPickup = { lat: -26.2371500, lng: 28.0305200 };
-    const fallbackDrop = { lat: -26.2400000, lng: 28.0400000 };
-
-    // Get store location from route data
+    // Get store location from route data - REAL COORDINATES ONLY
     const storeLocation = routeData?.storeLocation || { lat: null, lng: null };
     const storeAddress = routeData?.storeAddress || cart[0]?.storeAddress || '';
+    const deliveryCoords = routeData?.deliveryCoords || { lat: null, lng: null };
+
+    // Require real store coordinates - no fallbacks
+    if (!storeLocation?.lat || !storeLocation?.lng) {
+      setError('Store location not available. Please try again.');
+      setIsLoading(false);
+      return;
+    }
 
     try {
       const kgRange = getKgRange();
@@ -140,10 +145,10 @@ export function FoodDelivery() {
         pickup: storeAddress || 'Store',
         destination: deliveryLocation || 'Destination',
         stops: stops.map((s: any) => s.address).filter(Boolean),
-        pickupLat: storeLocation?.lat ?? fallbackPickup.lat,
-        pickupLng: storeLocation?.lng ?? fallbackPickup.lng,
-        dropLat: fallbackDrop.lat, // TODO: Get actual destination coords
-        dropLng: fallbackDrop.lng,
+        pickupLat: storeLocation.lat,
+        pickupLng: storeLocation.lng,
+        dropLat: deliveryCoords?.lat || storeLocation.lat + 0.01, // Offset if no destination coords
+        dropLng: deliveryCoords?.lng || storeLocation.lng + 0.01,
         serviceType: serviceType,
         category: category,
         kg: kgRange
@@ -366,46 +371,57 @@ export function FoodDelivery() {
 
   const hasOptions = deliveryOptions.length > 0;
 
+  // Build map markers for store and destination
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    const storeLocation = routeData?.storeLocation;
+    
+    if (storeLocation?.lat && storeLocation?.lng) {
+      markers.push({
+        id: 'store',
+        type: 'store',
+        lat: storeLocation.lat,
+        lng: storeLocation.lng
+      });
+    }
+    
+    // TODO: Add destination coords when available
+    // For now use a fixed offset from store
+    if (storeLocation?.lat && storeLocation?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: storeLocation.lat + 0.01,
+        lng: storeLocation.lng + 0.01
+      });
+    }
+    
+    return markers;
+  }, [routeData]);
+
+  // Calculate arrival time
+  const getArrivalTime = useCallback(() => {
+    if (!selectedOption?.eta) return null;
+    const now = new Date();
+    const arrivalDate = new Date(now.getTime() + (selectedOption.eta + 10) * 60000);
+    return arrivalDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  }, [selectedOption]);
+
   return (
     <div className="fixed inset-0 bg-gray-100 overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-to-br from-purple-100 via-purple-50 to-[#5B2EFF]/10">
-        <div className="absolute inset-0 opacity-40">
-          <svg className="w-full h-full">
-            <defs>
-              <pattern id="map-grid" width="60" height="60" patternUnits="userSpaceOnUse">
-                <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#cbd5e1" strokeWidth="1"/>
-              </pattern>
-            </defs>
-            <rect width="100%" height="100%" fill="url(#map-grid)" />
-            <path
-              d="M 200 400 Q 250 300 300 200"
-              stroke="#5B2EFF"
-              strokeWidth="4"
-              fill="none"
-              strokeLinecap="round"
-            />
-          </svg>
-        </div>
-
-        <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-          <div className="w-8 h-8 bg-[#5B2EFF] rounded-full border-4 border-white shadow-lg" />
-        </div>
-        <div className="absolute top-2/3 right-1/3">
-          <div className="w-6 h-6 bg-blue-500 rounded-full border-4 border-white shadow-lg" />
-        </div>
-
-        <motion.div
-          className="absolute top-32 left-1/2 transform -translate-x-1/2 bg-[#5B2EFF] text-white px-4 py-2 rounded-full shadow-lg text-sm font-semibold"
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          transition={{ delay: 0.3, type: 'spring' }}
-        >
-          {isLoading 
-            ? 'Finding drivers...'
-            : selectedOption?.enabled 
-              ? `Arrive in ~${selectedOption.eta + 10} min`
-              : 'Searching for drivers...'}
-        </motion.div>
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={routeData?.storeLocation?.lat && routeData?.storeLocation?.lng 
+            ? { lat: routeData.storeLocation.lat, lng: routeData.storeLocation.lng } 
+            : { lat: -15.3875, lng: 28.3228 }}
+          zoom={13}
+          markers={mapMarkers}
+          pickupEta={selectedOption?.enabled ? selectedOption.eta : undefined}
+          arrivalTime={selectedOption?.enabled ? getArrivalTime() || undefined : undefined}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
       </div>
 
       <motion.div

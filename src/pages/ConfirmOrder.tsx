@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, Users } from 'lucide-react';
-import { MapBackground } from '../components/MapBackground';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { useRideContext } from '../contexts/RideContext';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -420,9 +420,55 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
     }
   };
 
+  // Build map markers
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        id: 'pickup',
+        type: 'pickup',
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng
+      });
+    }
+    
+    if (destinationCoords?.lat && destinationCoords?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: destinationCoords.lat,
+        lng: destinationCoords.lng
+      });
+    }
+    
+    return markers;
+  }, [pickupCoords, destinationCoords]);
+
+  // Calculate arrival time
+  const getArrivalTime = useCallback(() => {
+    const eta = isRide ? parseInt(rideData?.eta?.replace(' min', '') || '2') : 2;
+    const now = new Date();
+    const arrivalDate = new Date(now.getTime() + eta * 60000);
+    return arrivalDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  }, [isRide, rideData]);
+
   return (
     <div className="min-h-screen relative overflow-hidden">
-      <MapBackground />
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={pickupCoords?.lat && pickupCoords?.lng 
+            ? { lat: pickupCoords.lat, lng: pickupCoords.lng } 
+            : { lat: -15.3875, lng: 28.3228 }}
+          zoom={14}
+          markers={mapMarkers}
+          pickupEta={isRide ? parseInt(rideData?.eta?.replace(' min', '') || '2') : 2}
+          arrivalTime={getArrivalTime()}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
+      </div>
 
       <AnimatePresence>
         {!isLoading && (

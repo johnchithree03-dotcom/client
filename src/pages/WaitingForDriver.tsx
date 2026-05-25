@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MapBackground } from '../components/MapBackground';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import { useFirebaseRide } from '../hooks/useFirebaseRide';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -62,6 +62,33 @@ export const WaitingForDriver: React.FC<WaitingForDriverProps> = ({
   const finalPrice = isService 
     ? (orderData.pricing?.basePrice || orderData.price || orderData.total) 
     : (isFood ? orderData.totalPrice : (orderData.price || orderData.estimatedPrice || price));
+
+  // Build map markers for pickup and destination
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    const pickupCoords = orderData.pickupCoords;
+    const destinationCoords = orderData.destinationCoords;
+    
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        id: 'pickup',
+        type: 'pickup',
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng
+      });
+    }
+    
+    if (destinationCoords?.lat && destinationCoords?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: destinationCoords.lat,
+        lng: destinationCoords.lng
+      });
+    }
+    
+    return markers;
+  }, [orderData.pickupCoords, orderData.destinationCoords]);
 
   // Progress timer for scanning animation
   useEffect(() => {
@@ -154,7 +181,18 @@ export const WaitingForDriver: React.FC<WaitingForDriverProps> = ({
 
   return (
     <div className="min-h-screen relative overflow-hidden">
-      <MapBackground />
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={orderData.pickupCoords?.lat && orderData.pickupCoords?.lng 
+            ? { lat: orderData.pickupCoords.lat, lng: orderData.pickupCoords.lng } 
+            : { lat: -15.3875, lng: 28.3228 }}
+          zoom={13}
+          markers={mapMarkers}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
+      </div>
 
       <motion.div
         className="absolute top-0 left-0 right-0 z-10 p-4"

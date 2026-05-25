@@ -1,13 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Search, Calendar, Clock, Package, X } from 'lucide-react';
+import { Search, Calendar, Clock } from 'lucide-react';
 import { DraggablePanel } from '../components/DraggablePanel';
 import { ScrollableSection } from '../components/ScrollableSection';
 import { BottomNavigation } from '../components/BottomNavigation';
-import { MapBackground } from '../components/MapBackground';
-import { recentSearches } from '../data/mockData';
+import { MapLibreMap } from '../components/MapLibreMap';
+import { getRecentAddresses, GeoapifyAddress } from '../services/geoapifyService';
 import { useRideContext } from '../contexts/RideContext';
+import { useGeolocation } from '../hooks/useGeolocation';
 
 interface DashboardProps {
   onSearchSelect: (address: string) => void;
@@ -15,12 +16,19 @@ interface DashboardProps {
 
 export const Dashboard: React.FC<DashboardProps> = ({ onSearchSelect }) => {
   const navigate = useNavigate();
-  const [showPromo, setShowPromo] = useState(true);
   const [panelHeight, setPanelHeight] = useState(450);
   const { isRideActive, rideStatus } = useRideContext();
+  const { latitude, longitude } = useGeolocation();
+  const [recentAddresses, setRecentAddresses] = useState<GeoapifyAddress[]>([]);
 
   const maxPanelHeight = 600;
   const minPanelHeight = 175;
+
+  // Load real recent addresses from localStorage (saved via Geoapify)
+  useEffect(() => {
+    const addresses = getRecentAddresses();
+    setRecentAddresses(addresses);
+  }, []);
 
   const handleNavigationBlock = (destination: string) => {
     const message = rideStatus === 'pending'
@@ -66,7 +74,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSearchSelect }) => {
 
   return (
     <div className="min-h-screen relative overflow-hidden">
-      <MapBackground />
+      {/* Real MapLibre Map Background */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={latitude && longitude ? { lat: latitude, lng: longitude } : { lat: -15.3875, lng: 28.3228 }}
+          zoom={13}
+          fitBounds={false}
+          className="w-full h-full"
+        />
+      </div>
       
       {/* Header */}
       <motion.div 
@@ -85,34 +101,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSearchSelect }) => {
           </button>
         </div>
       </motion.div>
-
-      {/* Cashless Promo Banner */}
-      {showPromo && (
-        <motion.div
-          className="absolute top-20 left-4 right-4 z-10 bg-blue-100 rounded-xl p-4 shadow-lg"
-          initial={{ y: -100, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.3 }}
-        >
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 bg-blue-600 rounded-full flex items-center justify-center">
-                <Package className="text-white" size={24} />
-              </div>
-              <div>
-                <h3 className="font-bold text-gray-800">Go Cashless, Enjoy 25% OFF!</h3>
-                <p className="text-sm text-gray-600">Add your card today and enjoy 25% off your next 5 rides this month!</p>
-              </div>
-            </div>
-            <button 
-              onClick={() => setShowPromo(false)}
-              className="p-2 hover:bg-blue-200 rounded-full transition-colors"
-            >
-              <X size={20} className="text-gray-600" />
-            </button>
-          </div>
-        </motion.div>
-      )}
 
       <DraggablePanel
         initialHeight={450}
@@ -173,27 +161,39 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSearchSelect }) => {
             </div>
           </div>
 
-          {/* Recent searches - stays in place */}
+          {/* Recent searches - real addresses from Geoapify history */}
           <div className="mt-4">
             <ScrollableSection maxHeight="max-h-40">
               <div className="space-y-2">
-                {recentSearches.map((search, index) => (
-                  <motion.button
-                    key={search.id}
-                    onClick={() => handleRecentAddressClick(search.address)}
-                    className="w-full flex items-center space-x-3 p-3 hover:bg-gray-50 rounded-lg transition-colors text-left"
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: 0.8 + index * 0.1 }}
-                    whileTap={{ scale: 0.98 }}
+                {recentAddresses.length > 0 ? (
+                  recentAddresses.map((search, index) => (
+                    <motion.button
+                      key={search.id}
+                      onClick={() => handleRecentAddressClick(search.address)}
+                      className="w-full flex items-center space-x-3 p-3 hover:bg-gray-50 rounded-lg transition-colors text-left"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.8 + index * 0.1 }}
+                      whileTap={{ scale: 0.98 }}
+                    >
+                      <Clock className="text-gray-400 flex-shrink-0" size={20} />
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-gray-900 truncate">{search.address}</p>
+                        <p className="text-sm text-gray-500 truncate">{search.description}</p>
+                      </div>
+                    </motion.button>
+                  ))
+                ) : (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.8 }}
+                    className="text-center py-4 text-gray-500"
                   >
-                    <Clock className="text-gray-400 flex-shrink-0" size={20} />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-900 truncate">{search.address}</p>
-                      <p className="text-sm text-gray-500 truncate">{search.description}</p>
-                    </div>
-                  </motion.button>
-                ))}
+                    <p className="text-sm">No recent addresses yet</p>
+                    <p className="text-xs mt-1">Search for a destination to get started</p>
+                  </motion.div>
+                )}
               </div>
             </ScrollableSection>
           </div>

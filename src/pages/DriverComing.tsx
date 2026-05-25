@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, MapPin, CreditCard as Edit, Phone, Share, CreditCard, X, MessageCircle } from 'lucide-react';
 import { DraggablePanel } from '../components/DraggablePanel';
 import { ScrollableSection } from '../components/ScrollableSection';
-import { MapBackground } from '../components/MapBackground';
+import { MapLibreMap, MapMarker } from '../components/MapLibreMap';
 import { MessagePanel } from '../components/MessagePanel';
 import { RatingModal } from '../components/RatingModal';
 import { firebaseService } from '../services/firebaseService';
@@ -308,9 +308,97 @@ export const DriverComing: React.FC<DriverComingProps> = ({
 
   const isMessageDisabled = rideStatus === 'pending' || rideStatus === 'completed';
 
+  // Driver location state for live tracking
+  const [driverLocation, setDriverLocation] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Update driver location when it comes from GPS listener
+  useEffect(() => {
+    if (driverInfo?.location) {
+      setDriverLocation({
+        lat: driverInfo.location.latitude,
+        lng: driverInfo.location.longitude
+      });
+    }
+  }, [driverInfo?.location]);
+
+  // Build map markers - pickup, dropoff, driver, and stops
+  const mapMarkers = useMemo((): MapMarker[] => {
+    const markers: MapMarker[] = [];
+    const pickupCoords = orderData?.pickupCoords || firestoreRideData?.pickup;
+    const dropCoords = orderData?.destinationCoords || firestoreRideData?.dropoff;
+    
+    if (pickupCoords?.lat && pickupCoords?.lng) {
+      markers.push({
+        id: 'pickup',
+        type: 'pickup',
+        lat: pickupCoords.lat,
+        lng: pickupCoords.lng
+      });
+    }
+    
+    if (dropCoords?.lat && dropCoords?.lng) {
+      markers.push({
+        id: 'dropoff',
+        type: 'dropoff',
+        lat: dropCoords.lat,
+        lng: dropCoords.lng
+      });
+    }
+    
+    // Add stop markers
+    const stops = finalStops || [];
+    stops.forEach((stop: any, index: number) => {
+      if (stop.lat && stop.lng) {
+        markers.push({
+          id: `stop-${index}`,
+          type: 'stop',
+          lat: stop.lat,
+          lng: stop.lng,
+          label: `${index + 1}`
+        });
+      }
+    });
+    
+    return markers;
+  }, [orderData, firestoreRideData, finalStops]);
+
+  // Calculate ETA and arrival time
+  const getArrivalTime = useCallback(() => {
+    if (!statusText.includes('min')) return null;
+    const match = statusText.match(/(\d+)\s*min/);
+    if (match) {
+      const eta = parseInt(match[1]);
+      const now = new Date();
+      const arrivalDate = new Date(now.getTime() + eta * 60000);
+      return arrivalDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    }
+    return null;
+  }, [statusText]);
+
+  // Extract ETA minutes from status text
+  const getEtaMinutes = useCallback(() => {
+    const match = statusText.match(/(\d+)\s*min/);
+    return match ? parseInt(match[1]) : undefined;
+  }, [statusText]);
+
   return (
     <div className="min-h-screen relative overflow-hidden">
-      <MapBackground />
+      {/* Real MapLibre Map with live driver tracking */}
+      <div className="absolute inset-0 z-0">
+        <MapLibreMap
+          center={driverLocation || (orderData?.pickupCoords?.lat && orderData?.pickupCoords?.lng 
+            ? { lat: orderData.pickupCoords.lat, lng: orderData.pickupCoords.lng } 
+            : { lat: -15.3875, lng: 28.3228 })}
+          zoom={14}
+          markers={mapMarkers}
+          driverPosition={driverLocation || undefined}
+          polyline={firestoreRideData?.polyline}
+          pickupEta={getEtaMinutes()}
+          arrivalTime={getArrivalTime() || undefined}
+          fitBounds={mapMarkers.length > 1}
+          className="w-full h-full"
+        />
+      </div>
 
       {/* Arrival Alert */}
       <AnimatePresence>
