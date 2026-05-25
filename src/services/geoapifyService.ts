@@ -88,7 +88,7 @@ export const searchAddresses = async (
 
   try {
     // Build URL with Zambia filter
-    let url = `${GEOAPIFY_BASE_URL}?text=${encodeURIComponent(query)}&filter=countrycode:zm&apiKey=${GEOAPIFY_API_KEY}&limit=10`;
+    let url = `${GEOAPIFY_BASE_URL}?text=${encodeURIComponent(query)}&filter=countrycode:zm,za&apiKey=${GEOAPIFY_API_KEY}&limit=10`;
     
     // Add bias towards user location if available
     if (userLocation?.lat && userLocation?.lng) {
