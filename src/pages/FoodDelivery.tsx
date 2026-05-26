@@ -1,0 +1,754 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { motion, PanInfo, AnimatePresence, useMotionValue, useSpring, useTransform } from 'framer-motion';
+import { X, Plus, Calendar, User, Briefcase, ChevronDown, RefreshCw, Users } from 'lucide-react';
+import { useGlobalCart } from '../contexts/GlobalCartContext';
+import { apiPost } from '../config/api';
+import {
+  BackendRideOption,
+  getVehicleConfig,
+  filterOptionsByService,
+  enrichRideOption,
+  sortOptionsWithRecommendedFirst
+} from '../config/vehicleConfig';
+
+type FilterTab = 'standard' | 'faster' | 'cheaper';
+
+const PROMO_TEXT = '30% promo applied';
+const PROMO_ACTIVE = true;
+const PROMO_DISCOUNT = 30;
+
+const PANEL_MIN_HEIGHT = 36;
+const PANEL_MAX_HEIGHT = 85;
+const SNAP_THRESHOLD = 65;
+
+// Skeleton Card Component for loading state
+const DeliverySkeletonCard: React.FC<{ index: number }> = ({ index }) => (
+  <motion.div
+    className="w-full p-4 rounded-2xl border-2 border-gray-200 bg-white"
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+    transition={{ delay: index * 0.05 }}
+  >
+    <div className="flex items-center space-x-4">
+      <div className="w-16 h-16 rounded-xl bg-gray-200 animate-pulse" />
+      <div className="flex-1">
+        <div className="flex items-center justify-between mb-2">
+          <div className="h-5 w-24 bg-gray-200 rounded animate-pulse" />
+          <div className="h-5 w-16 bg-gray-200 rounded animate-pulse" />
+        </div>
+        <div className="flex items-center space-x-4">
+          <div className="h-4 w-16 bg-gray-200 rounded animate-pulse" />
+          <div className="h-4 w-12 bg-gray-200 rounded animate-pulse" />
+        </div>
+      </div>
+    </div>
+  </motion.div>
+);
+
+export function FoodDelivery() {
+  const navigate = useNavigate();
+  const { cart, getKgRange } = useGlobalCart();
+
+  // Load data from localStorage (from FoodiesRoute)
+  const [routeData, setRouteData] = useState<any>(() => {
+    const stored = localStorage.getItem('FOODIES_ROUTE_DATA');
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (error) {
+        console.error('Error loading route data:', error);
+        return null;
+      }
+    }
+    return null;
+  });
+
+  // Backend delivery options state
+  const [deliveryOptions, setDeliveryOptions] = useState<BackendRideOption[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedOption, setSelectedOption] = useState<BackendRideOption | null>(null);
+
+  const [selectedFilter, setSelectedFilter] = useState<FilterTab>('standard');
+  const [profileToggle, setProfileToggle] = useState<'personal' | 'business'>('personal');
+  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [isScrolledToTop, setIsScrolledToTop] = useState(true);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Spring-driven panel height for smooth animations
+  const rawPanelVh = useMotionValue(PANEL_MIN_HEIGHT);
+  const springPanelVh = useSpring(rawPanelVh, {
+    stiffness: 300,
+    damping: 35,
+    mass: 0.8,
+  });
+  const panelHeightStyle = useTransform(springPanelVh, (v) => `${v}vh`);
+
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Track expansion state from spring value
+  useEffect(() => {
+    const unsubscribe = springPanelVh.on('change', (latest) => {
+      setIsExpanded(latest > SNAP_THRESHOLD);
+    });
+    return unsubscribe;
+  }, [springPanelVh]);
+
+  // Track scroll position to determine when to allow panel drag
+  const handleScroll = useCallback(() => {
+    if (scrollRef.current) {
+      setIsScrolledToTop(scrollRef.current.scrollTop <= 0);
+    }
+  }, []);
+
+  // Use route data from localStorage
+  const deliveryLocation = routeData?.deliveryLocation || '';
+  const stops = routeData?.stops || [];
+  const category = routeData?.category || cart[0]?.category || 'food';
+
+  // Determine service type based on category
+  // food/clothes use 'courier', hardware uses 'delivery'
+  const serviceType = category === 'hardware' ? 'delivery' : 'courier';
+
+  // CART IS THE SINGLE SOURCE OF TRUTH
+  const totalItemCount = useMemo(() => cart.length, [cart.length]);
+
+  // Food subtotal from cart
+  const foodSubtotal = useMemo(() => {
+    return cart.reduce((sum, item) => sum + item.price, 0);
+  }, [cart]);
+
+  // Load delivery options from backend
+  const loadDeliveryOptions = useCallback(async () => {
+    setIsLoading(true);
+    setError('');
+
+    // Fallback coordinates (Johannesburg area)
+    const fallbackPickup = { lat: -26.2371500, lng: 28.0305200 };
+    const fallbackDrop = { lat: -26.2400000, lng: 28.0400000 };
+
+    // Get store location from route data
+    const storeLocation = routeData?.storeLocation || { lat: null, lng: null };
+    const storeAddress = routeData?.storeAddress || cart[0]?.storeAddress || '';
+
+    try {
+      const kgRange = getKgRange();
+      
+      const payload: Record<string, unknown> = {
+        pickup: storeAddress || 'Store',
+        destination: deliveryLocation || 'Destination',
+        stops: stops.map((s: any) => s.address).filter(Boolean),
+        pickupLat: storeLocation?.lat ?? fallbackPickup.lat,
+        pickupLng: storeLocation?.lng ?? fallbackPickup.lng,
+        dropLat: fallbackDrop.lat, // TODO: Get actual destination coords
+        dropLng: fallbackDrop.lng,
+        serviceType: serviceType,
+        category: category,
+        kg: kgRange
+      };
+
+      console.log('[v0] Sending delivery payload:', payload);
+
+      const response = await apiPost<{ data?: BackendRideOption[] }>('/getRideOptions', payload);
+      
+      console.log('[v0] Delivery options response:', response);
+      
+      const options = response.data || response || [];
+      const optionsArray = Array.isArray(options) ? options : [];
+      
+      // Filter options by service type before setting state
+      const filteredOptions = filterOptionsByService(optionsArray, serviceType);
+
+      // Enrich each option with dispatchService and vehicleCategory
+      const enrichedOptions = filteredOptions.map(opt => enrichRideOption(opt, serviceType));
+
+      setDeliveryOptions(enrichedOptions);
+
+      // Auto-select first enabled vehicle
+      const firstEnabled = enrichedOptions.find((x: BackendRideOption) => x.enabled);
+      if (firstEnabled) {
+        setSelectedOption(firstEnabled);
+      }
+    } catch (err) {
+      console.error('[v0] Failed to load delivery options:', err);
+      setError('Failed to load delivery options');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [routeData, cart, deliveryLocation, stops, serviceType, category, getKgRange]);
+
+  // Ref to prevent duplicate fetches
+  const hasFetchedRef = useRef(false);
+
+  // Fetch on mount - SINGLE API CALL
+  useEffect(() => {
+    if (hasFetchedRef.current) return;
+    hasFetchedRef.current = true;
+    loadDeliveryOptions();
+  }, []);
+
+  // Retry function
+  const handleRetry = useCallback(() => {
+    hasFetchedRef.current = false;
+    loadDeliveryOptions();
+  }, [loadDeliveryOptions]);
+
+  // Redirect if no route data or cart
+  useEffect(() => {
+    if (!routeData || cart.length === 0) {
+      console.log('No route data or empty cart, redirecting to shop');
+      navigate('/shop', { replace: true });
+    }
+  }, [routeData, cart.length, navigate]);
+
+  // Get sorted delivery options - recommended first, then by filter criteria
+  const getSortedOptions = (): BackendRideOption[] => {
+    // Start with recommended sorting
+    let sorted = sortOptionsWithRecommendedFirst(deliveryOptions);
+
+    if (selectedFilter === 'faster') {
+      sorted.sort((a, b) => {
+        // Recommended still comes first
+        if (a.recommended && !b.recommended) return -1;
+        if (!a.recommended && b.recommended) return 1;
+        if (a.enabled && !b.enabled) return -1;
+        if (!a.enabled && b.enabled) return 1;
+        return a.eta - b.eta;
+      });
+    } else if (selectedFilter === 'cheaper') {
+      sorted.sort((a, b) => {
+        // Recommended still comes first
+        if (a.recommended && !b.recommended) return -1;
+        if (!a.recommended && b.recommended) return 1;
+        if (a.enabled && !b.enabled) return -1;
+        if (!a.enabled && b.enabled) return 1;
+        return a.price - b.price;
+      });
+    }
+
+    return sorted;
+  };
+
+  const sortedOptions = getSortedOptions();
+
+  // Calculate discounted price
+  const getDiscountedPrice = (price: number): number => {
+    return Math.round(price * (1 - PROMO_DISCOUNT / 100));
+  };
+
+  // Get delivery fee (discounted price from selected option)
+  const deliveryFee = selectedOption ? getDiscountedPrice(selectedOption.price) : 0;
+  const total = foodSubtotal + deliveryFee;
+
+  // Handle drag on the drag handle only
+  const handleDrag = useCallback((_event: any, info: PanInfo) => {
+    const windowHeight = window.innerHeight;
+    const deltaVh = (-info.delta.y / windowHeight) * 100;
+    const newVh = rawPanelVh.get() + deltaVh;
+    rawPanelVh.set(Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_MAX_HEIGHT, newVh)));
+  }, [rawPanelVh]);
+
+  const handleDragStart = useCallback(() => {
+    setIsDragging(true);
+  }, []);
+
+  const handleDragEnd = useCallback((_event: any, info: PanInfo) => {
+    setIsDragging(false);
+    const velocity = -info.velocity.y;
+
+    if (Math.abs(velocity) > 600) {
+      rawPanelVh.set(velocity > 0 ? PANEL_MAX_HEIGHT : PANEL_MIN_HEIGHT);
+    } else {
+      const currentVh = rawPanelVh.get();
+      if (currentVh > SNAP_THRESHOLD) {
+        rawPanelVh.set(PANEL_MAX_HEIGHT);
+      } else {
+        rawPanelVh.set(PANEL_MIN_HEIGHT);
+      }
+    }
+  }, [rawPanelVh]);
+
+  const handleContentTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!isScrolledToTop) {
+      e.stopPropagation();
+    }
+  }, [isScrolledToTop]);
+
+  const handleClose = () => {
+    navigate(-1);
+  };
+
+  const handleAddStop = () => {
+    const updatedData = {
+      ...routeData,
+      timestamp: Date.now()
+    };
+    localStorage.setItem('FOODIES_ROUTE_DATA', JSON.stringify(updatedData));
+    navigate(-1);
+  };
+
+  const handleAddressClick = () => {
+    navigate(-1);
+  };
+
+  const handleSelectMode = () => {
+    if (!routeData || !selectedOption?.enabled) {
+      return;
+    }
+
+    const storeId = routeData.storeId || cart[0]?.storeId || '';
+    const storeName = routeData.storeName || cart[0]?.storeName || '';
+    const storeAddress = routeData.storeAddress || cart[0]?.storeAddress || '';
+    const storeLocation = routeData.storeLocation || { lat: null, lng: null };
+
+    navigate('/confirm-order', {
+      state: {
+        orderType: 'delivery',
+        type: category,
+        // Pass serviceType explicitly so ConfirmOrder doesn't have to infer it
+        serviceType: serviceType,
+        orderData: {
+          deliveryMode: {
+            id: selectedOption.category,
+            label: selectedOption.title,
+            time: `${selectedOption.eta} min`,
+            description: `Delivery vehicle`,
+            deliveryFee: deliveryFee,
+            originalFee: selectedOption.price
+          },
+          // CRITICAL: Pass all backend metadata correctly
+          dispatchService: selectedOption.dispatchService,
+          vehicleCategory: selectedOption.vehicleCategory,
+          selectedVehicle: selectedOption.category,
+          pricingCategory: selectedOption.pricingCategory,
+          // Store info
+          storeId: storeId,
+          storeName: storeName,
+          storeAddress: storeAddress,
+          storeLocation: storeLocation,
+          destinationAddress: routeData.deliveryLocation || 'Destination',
+          stops: stops || [],
+          items: cart,
+          subtotal: foodSubtotal,
+          deliveryFee: deliveryFee,
+          totalPrice: total
+        }
+      }
+    });
+  };
+
+  const handleCashClick = () => {
+    console.log('Cash payment clicked');
+  };
+
+  const handleScheduleClick = () => {
+    console.log('Schedule clicked');
+  };
+
+  const getAddressDisplay = () => {
+    const mainAddress = deliveryLocation || 'Current Location';
+    const stopsText = stops.length > 0 ? ` +${stops.length} stop${stops.length > 1 ? 's' : ''}` : '';
+    return `${mainAddress}${stopsText}`;
+  };
+
+  // Get icon config for a delivery option using unified config
+  const getIconConfig = (categoryKey: string) => {
+    return getVehicleConfig(categoryKey);
+  };
+
+  // Format ETA
+  const formatEta = (etaMinutes: number, enabled: boolean): string => {
+    if (!enabled) return 'No drivers';
+    return `${etaMinutes} min`;
+  };
+
+  const hasOptions = deliveryOptions.length > 0;
+
+  return (
+    <div className="fixed inset-0 bg-gray-100 overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-br from-purple-100 via-purple-50 to-[#5B2EFF]/10">
+        <div className="absolute inset-0 opacity-40">
+          <svg className="w-full h-full">
+            <defs>
+              <pattern id="map-grid" width="60" height="60" patternUnits="userSpaceOnUse">
+                <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#cbd5e1" strokeWidth="1"/>
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#map-grid)" />
+            <path
+              d="M 200 400 Q 250 300 300 200"
+              stroke="#5B2EFF"
+              strokeWidth="4"
+              fill="none"
+              strokeLinecap="round"
+            />
+          </svg>
+        </div>
+
+        <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
+          <div className="w-8 h-8 bg-[#5B2EFF] rounded-full border-4 border-white shadow-lg" />
+        </div>
+        <div className="absolute top-2/3 right-1/3">
+          <div className="w-6 h-6 bg-blue-500 rounded-full border-4 border-white shadow-lg" />
+        </div>
+
+        <motion.div
+          className="absolute top-32 left-1/2 transform -translate-x-1/2 bg-[#5B2EFF] text-white px-4 py-2 rounded-full shadow-lg text-sm font-semibold"
+          initial={{ scale: 0 }}
+          animate={{ scale: 1 }}
+          transition={{ delay: 0.3, type: 'spring' }}
+        >
+          {isLoading 
+            ? 'Finding drivers...'
+            : selectedOption?.enabled 
+              ? `Arrive in ~${selectedOption.eta + 10} min`
+              : 'Searching for drivers...'}
+        </motion.div>
+      </div>
+
+      <motion.div
+        className="absolute top-4 left-4 right-4 z-30"
+        initial={{ y: -50, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ delay: 0.1 }}
+      >
+        <div className="bg-white rounded-2xl shadow-lg px-4 py-3 flex items-center gap-3">
+          <button
+            onClick={handleClose}
+            className="flex-shrink-0 w-8 h-8 flex items-center justify-center hover:bg-gray-100 rounded-full transition-colors"
+          >
+            <X size={20} className="text-gray-700" />
+          </button>
+
+          <button
+            onClick={handleAddressClick}
+            className="flex-1 text-left min-w-0"
+          >
+            <div className="overflow-x-auto scrollbar-hide" style={{ WebkitOverflowScrolling: 'touch' }}>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <span className="text-sm font-medium text-gray-900">
+                  {getAddressDisplay()}
+                </span>
+                <span className="text-gray-400">→</span>
+                <span className="text-sm font-medium text-gray-700">
+                  Delivery ({totalItemCount} item{totalItemCount !== 1 ? 's' : ''})
+                </span>
+              </div>
+            </div>
+          </button>
+
+          <button
+            onClick={handleAddStop}
+            className="flex-shrink-0 w-8 h-8 flex items-center justify-center hover:bg-gray-100 rounded-full transition-colors"
+          >
+            <Plus size={20} className="text-gray-700" />
+          </button>
+        </div>
+      </motion.div>
+
+      <motion.div
+        ref={panelRef}
+        className="fixed bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl z-20 flex flex-col will-change-transform"
+        style={{
+          height: panelHeightStyle,
+        }}
+        initial={{ y: 100, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ type: 'spring', damping: 30, stiffness: 260, mass: 0.6 }}
+      >
+        {PROMO_ACTIVE && (
+          <motion.div
+            className="bg-[#5B2EFF] text-white w-full px-4 py-3 flex items-center justify-center gap-2 rounded-t-3xl flex-shrink-0"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.1 }}
+          >
+            <span className="text-white">✓</span>
+            <span className="font-medium text-sm">{PROMO_TEXT}</span>
+            <ChevronDown size={16} />
+          </motion.div>
+        )}
+
+        <motion.div
+          className="w-full pt-3 pb-2 flex justify-center cursor-grab active:cursor-grabbing flex-shrink-0 touch-none"
+          drag="y"
+          dragConstraints={{ top: 0, bottom: 0 }}
+          dragElastic={0}
+          dragMomentum={false}
+          onDragStart={handleDragStart}
+          onDrag={handleDrag}
+          onDragEnd={handleDragEnd}
+          whileTap={{ scale: 1.02 }}
+        >
+          <div className="w-12 h-1 bg-gray-300 rounded-full" />
+        </motion.div>
+
+        <AnimatePresence>
+          {isExpanded && (
+            <motion.div
+              className="px-4 flex-shrink-0 overflow-hidden"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{
+                type: 'spring',
+                damping: 25,
+                stiffness: 300,
+                opacity: { duration: 0.2 }
+              }}
+            >
+              <div className="flex gap-3 mb-4">
+                <motion.button
+                  onClick={() => setSelectedFilter('standard')}
+                  className={`px-4 py-2 rounded-full font-medium text-sm transition-all whitespace-nowrap ${
+                    selectedFilter === 'standard'
+                      ? 'bg-white border-2 border-[#5B2EFF] text-gray-900'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                  initial={{ scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.8, opacity: 0 }}
+                  transition={{ delay: 0.05, type: 'spring', damping: 20, stiffness: 300 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Standard
+                </motion.button>
+                <motion.button
+                  onClick={() => setSelectedFilter('faster')}
+                  className={`px-4 py-2 rounded-full font-medium text-sm transition-all flex items-center gap-1 whitespace-nowrap ${
+                    selectedFilter === 'faster'
+                      ? 'bg-white border-2 border-[#5B2EFF] text-gray-900'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                  initial={{ scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.8, opacity: 0 }}
+                  transition={{ delay: 0.1, type: 'spring', damping: 20, stiffness: 300 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Faster
+                </motion.button>
+                <motion.button
+                  onClick={() => setSelectedFilter('cheaper')}
+                  className={`px-4 py-2 rounded-full font-medium text-sm transition-all flex items-center gap-1 whitespace-nowrap ${
+                    selectedFilter === 'cheaper'
+                      ? 'bg-white border-2 border-[#5B2EFF] text-gray-900'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                  initial={{ scale: 0.8, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.8, opacity: 0 }}
+                  transition={{ delay: 0.15, type: 'spring', damping: 20, stiffness: 300 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  Cheaper
+                </motion.button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div 
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto px-4 overscroll-contain"
+          style={{ 
+            WebkitOverflowScrolling: 'touch',
+            touchAction: isDragging ? 'none' : 'pan-y'
+          }}
+          onScroll={handleScroll}
+          onTouchStart={handleContentTouchStart}
+        >
+          {/* SKELETON LOADING STATE */}
+          {isLoading ? (
+            <div className="space-y-3 mb-6">
+              {[0, 1, 2, 3].map((index) => (
+                <DeliverySkeletonCard key={index} index={index} />
+              ))}
+            </div>
+          ) : error ? (
+            /* ERROR STATE */
+            <div className="flex flex-col items-center justify-center py-8">
+              <p className="text-red-600 mb-4">{error}</p>
+              <motion.button
+                onClick={handleRetry}
+                className="flex items-center gap-2 px-4 py-2 bg-[#5B2EFF] text-white rounded-full font-medium"
+                whileTap={{ scale: 0.95 }}
+              >
+                <RefreshCw size={16} />
+                Retry
+              </motion.button>
+            </div>
+          ) : !hasOptions ? (
+            /* EMPTY STATE */
+            <div className="flex flex-col items-center justify-center py-8">
+              <p className="text-gray-600 text-center mb-2">No delivery vehicles available</p>
+              <p className="text-gray-400 text-sm text-center mb-4">Try again in a moment</p>
+              <motion.button
+                onClick={handleRetry}
+                className="flex items-center gap-2 px-4 py-2 bg-[#5B2EFF] text-white rounded-full font-medium"
+                whileTap={{ scale: 0.95 }}
+              >
+                <RefreshCw size={16} />
+                Refresh
+              </motion.button>
+            </div>
+          ) : (
+            /* SUCCESS STATE - Render backend response */
+            <div className="space-y-3 mb-6">
+              {sortedOptions.map((option, index) => {
+                const discountedPrice = getDiscountedPrice(option.price);
+                const iconConfig = getIconConfig(option.category);
+                const cardTotal = foodSubtotal + discountedPrice;
+                
+                return (
+                  <motion.button
+                    key={option.category}
+                    onClick={() => option.enabled && setSelectedOption(option)}
+                    disabled={!option.enabled}
+                    className={`w-full p-4 rounded-2xl border-2 transition-all ${
+                      !option.enabled 
+                        ? 'border-gray-200 bg-gray-50 opacity-60 cursor-not-allowed'
+                        : selectedOption?.category === option.category
+                          ? 'border-[#5B2EFF] bg-[#5B2EFF]/10'
+                          : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.05 }}
+                    whileTap={{ scale: option.enabled ? 0.98 : 1 }}
+                  >
+                    <div className="flex items-center space-x-4">
+                      <div className="w-16 h-16 flex items-center justify-center rounded-xl overflow-hidden">
+                        <img 
+                          src={iconConfig.image} 
+                          alt={option.title}
+                          className="w-14 h-14 object-contain"
+                        />
+                      </div>
+                      <div className="flex-1 text-left">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-bold text-gray-900">{option.title}</h3>
+                            {option.recommended && (
+                              <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">
+                                Recommended
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <p className="font-bold text-gray-900">R {cardTotal}</p>
+                            <p className="text-sm text-gray-500">R {discountedPrice} fee</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-4 mt-1">
+                          <span className={`text-sm ${option.enabled ? 'text-gray-600' : 'text-orange-600'}`}>
+                            {formatEta(option.eta, option.enabled)}
+                          </span>
+                          {/* Seats hidden for delivery services - only show capacity info if needed */}
+                        </div>
+                        {!option.enabled && (
+                          <span className="inline-block mt-2 px-2 py-1 rounded-full text-xs font-bold bg-orange-100 text-orange-800">
+                            NO DRIVERS
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </motion.button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Price breakdown - only show when we have data */}
+          {!isLoading && hasOptions && (
+            <motion.div
+              className="bg-white border-t border-gray-200 pt-4 space-y-3 mb-4"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2 }}
+            >
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">Item subtotal</span>
+                <span className="font-medium text-gray-900">R {foodSubtotal}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600">Delivery fee</span>
+                <span className="font-medium text-gray-900">R {deliveryFee}</span>
+              </div>
+              <div className="flex justify-between text-lg font-bold pt-2 border-t border-gray-200">
+                <span className="text-gray-900">Total</span>
+                <span className="text-gray-900">R {total}</span>
+              </div>
+            </motion.div>
+          )}
+        </div>
+
+        <div className="flex-shrink-0 bg-white border-t border-gray-200 px-4 py-3">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="relative bg-gray-100 rounded-full p-1 flex items-center flex-shrink-0">
+              <motion.div
+                className="absolute top-1 bottom-1 left-1 bg-white rounded-full shadow-md"
+                animate={{
+                  width: 40,
+                  x: profileToggle === 'personal' ? 0 : 40
+                }}
+                transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+              />
+              <button
+                onClick={() => setProfileToggle('personal')}
+                className="relative z-10 w-10 h-10 flex items-center justify-center"
+              >
+                <User size={18} className={profileToggle === 'personal' ? 'text-gray-900' : 'text-gray-400'} />
+              </button>
+              <button
+                onClick={() => setProfileToggle('business')}
+                className="relative z-10 w-10 h-10 flex items-center justify-center"
+              >
+                <Briefcase size={18} className={profileToggle === 'business' ? 'text-gray-900' : 'text-gray-400'} />
+              </button>
+            </div>
+
+            <motion.button
+              onClick={handleCashClick}
+              className="py-2 px-3 bg-white border border-gray-300 rounded-lg font-medium text-gray-900 hover:bg-gray-50 transition-colors flex items-center justify-center gap-1 flex-shrink-0 text-sm"
+              whileTap={{ scale: 0.95 }}
+            >
+              Cash
+              <ChevronDown size={14} />
+            </motion.button>
+
+            <div className="flex-1" />
+
+            <motion.button
+              onClick={handleScheduleClick}
+              className="w-12 h-12 bg-[#5B2EFF] text-white rounded-2xl flex items-center justify-center hover:bg-[#4A24D9] transition-colors shadow-lg flex-shrink-0"
+              whileTap={{ scale: 0.95 }}
+            >
+              <Calendar size={20} />
+            </motion.button>
+          </div>
+
+          <motion.button
+            onClick={handleSelectMode}
+            disabled={!selectedOption?.enabled || isLoading}
+            className={`w-full py-3 rounded-2xl font-bold text-base transition-colors shadow-lg ${
+              !selectedOption?.enabled || isLoading
+                ? 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                : 'bg-[#5B2EFF] text-white hover:bg-[#4A24D9]'
+            }`}
+            whileTap={{ scale: (!selectedOption?.enabled || isLoading) ? 1 : 0.98 }}
+          >
+            {isLoading 
+              ? 'Loading...'
+              : selectedOption?.enabled 
+                ? `Select ${selectedOption.title}`
+                : 'No drivers available'
+            }
+          </motion.button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}

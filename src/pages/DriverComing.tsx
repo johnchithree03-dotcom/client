@@ -1,0 +1,636 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Plus, MapPin, CreditCard as Edit, Phone, Share, CreditCard, X, MessageCircle } from 'lucide-react';
+import { DraggablePanel } from '../components/DraggablePanel';
+import { ScrollableSection } from '../components/ScrollableSection';
+import { MapBackground } from '../components/MapBackground';
+import { MessagePanel } from '../components/MessagePanel';
+import { RatingModal } from '../components/RatingModal';
+import { firebaseService } from '../services/firebaseService';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { useUserProfile } from '../hooks/useUserProfile';
+import { useFirebaseRide } from '../hooks/useFirebaseRide';
+import { useMessageContext } from '../contexts/MessageContext';
+import { db } from '../config/firebase';
+import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { listenToDriverLocation, calculateETA } from '../services/trackingService';
+import { 
+  subscribeToOrder, 
+  cancelOrder, 
+  Order, 
+  OrderStatus,
+  getStatusDisplayText 
+} from '../services/orderService';
+
+interface DriverComingProps {
+  destination: string;
+  pickup: string;
+  stops: string[];
+  carType: string;
+  price: number;
+  currentRideId: string | null;
+  onBack: () => void;
+}
+
+interface DriverInfo {
+  id: string;
+  name: string;
+  rating: number;
+  plateNumber: string;
+  carModel: string;
+  carImage?: string; // Vehicle photo
+  eta: string;
+  photo: string;
+  phone?: string; // Driver phone for call button
+  location: {
+    latitude: number;
+    longitude: number;
+  };
+}
+
+// Driver Card Skeleton Component - matches SelectRide skeleton style
+const DriverCardSkeleton: React.FC = () => (
+  <motion.div
+    className="bg-gray-50 rounded-2xl p-4"
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+  >
+    <div className="flex items-center space-x-4">
+      {/* Profile picture skeleton */}
+      <div className="w-16 h-16 rounded-full bg-gray-200 animate-pulse" />
+      
+      <div className="flex-1 space-y-2">
+        {/* Plate number skeleton */}
+        <div className="h-5 w-28 bg-gray-200 rounded animate-pulse" />
+        {/* Car model skeleton */}
+        <div className="h-4 w-36 bg-gray-200 rounded animate-pulse" />
+        {/* Driver name skeleton */}
+        <div className="h-4 w-20 bg-gray-200 rounded animate-pulse" />
+      </div>
+      
+      {/* Car image skeleton */}
+      <div className="w-16 h-12 rounded-lg bg-gray-200 animate-pulse" />
+    </div>
+  </motion.div>
+);
+
+export const DriverComing: React.FC<DriverComingProps> = ({
+  destination,
+  pickup,
+  stops,
+  carType,
+  price,
+  currentRideId,
+  onBack
+}) => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { profile } = useUserProfile();
+  const { currentRide } = useFirebaseRide(currentRideId);
+  const { unreadMessageCount, markMessagesAsRead } = useMessageContext();
+
+  const { 
+    orderType = 'ride', 
+    orderId: stateOrderId,
+    requestId, 
+    orderData = {}
+  } = location.state || {};
+  
+  const isFood = orderType === 'food';
+  const isService = orderType === 'service' || ['package', 'towing', 'truck'].includes(orderType);
+  const isRide = orderType === 'ride';
+  const orderId = stateOrderId || requestId || currentRideId;
+
+  const [driverInfo, setDriverInfo] = useState<DriverInfo | null>(null);
+  const [isDriverLoading, setIsDriverLoading] = useState<boolean>(true);
+  const [rideStatus, setRideStatus] = useState<string>('accepted');
+  const [statusText, setStatusText] = useState('Finding driver...');
+  const [showArrivalAlert, setShowArrivalAlert] = useState(false);
+  const [hasShownArrivalAlert, setHasShownArrivalAlert] = useState(false);
+  const [isMessagePanelOpen, setIsMessagePanelOpen] = useState(false);
+  const [isRatingModalOpen, setIsRatingModalOpen] = useState(false);
+  const [showCancelConfirmation, setShowCancelConfirmation] = useState(false);
+  const [foodOrderDetails, setFoodOrderDetails] = useState<any>(null);
+  const [serviceRequestDetails, setServiceRequestDetails] = useState<any>(null);
+  const [firestoreRideData, setFirestoreRideData] = useState<any>(null);
+  const gpsListenerRef = useRef<(() => void) | null>(null);
+  const orderListenerRef = useRef<(() => void) | null>(null);
+
+  const finalDestination = isService 
+    ? orderData.destinationAddress 
+    : isFood 
+      ? orderData.destinationAddress 
+      : (orderData.destination || orderData.destinationLocation?.address || destination);
+  
+  const finalPickup = isService 
+    ? orderData.pickupAddress 
+    : isFood 
+      ? orderData.pickupAddress 
+      : (orderData.pickup || orderData.pickupLocation?.address || pickup);
+  
+  const finalStops = isService 
+    ? (orderData.stops || []) 
+    : isFood 
+      ? (orderData.stops || []) 
+      : (orderData.stops || stops);
+  
+  const finalCarType = isService 
+    ? orderData.vehicleClass 
+    : isFood 
+      ? orderData.deliveryMode?.label 
+      : (orderData.rideName || carType);
+  
+  const finalPrice = isService 
+    ? orderData.pricing?.basePrice 
+    : isFood 
+      ? orderData.totalPrice 
+    : (orderData.estimatedPrice || price);
+  
+  // Listen to order status changes from unified orders collection
+  useEffect(() => {
+    if (!orderId) return;
+
+    // Subscribe to unified orders collection
+    const unsubscribe = subscribeToOrder(orderId, (order) => {
+      if (!order) return;
+
+      setFirestoreRideData(order);
+      const newStatus = order.status;
+      setRideStatus(newStatus);
+
+      // Update driver info from order document when driver data is available
+      // IMPORTANT: Driver info MUST come from the order document, NOT from querying drivers collection
+      // The backend injects driver snapshot into the order document after driver acceptance
+      // Fields from Firestore driverSnapshot: firstName, profilePicture, rating, brand, model, color, plateNumber, carImage
+      const driverFromOrder = (order as any).driverSnapshot || (order as any).driver;
+      if (driverFromOrder && !driverInfo) {
+        const mappedDriver: DriverInfo = {
+          id: driverFromOrder.uid || driverFromOrder.id || '',
+          // Use firstName from Firestore
+          name: driverFromOrder.firstName || driverFromOrder.name || 'Driver',
+          rating: driverFromOrder.rating || 0,
+          // Use plateNumber directly from Firestore
+          plateNumber: driverFromOrder.plateNumber || driverFromOrder.vehicle?.plateNumber || driverFromOrder.licensePlate || '',
+          // Build car model from Firestore fields: color, brand, model
+          carModel: driverFromOrder.color && driverFromOrder.brand && driverFromOrder.model
+            ? `${driverFromOrder.color} ${driverFromOrder.brand} ${driverFromOrder.model}`.trim()
+            : driverFromOrder.vehicle 
+              ? `${driverFromOrder.vehicle.color || ''} ${driverFromOrder.vehicle.brand || ''} ${driverFromOrder.vehicle.model || ''}`.trim()
+              : `${driverFromOrder.vehicleColor || ''} - ${driverFromOrder.vehicleMake || ''} ${driverFromOrder.vehicleModel || ''}`.trim(),
+          // Use carImage from Firestore for vehicle photo
+          carImage: driverFromOrder.carImage || driverFromOrder.vehicleImage || '',
+          eta: '',
+          // Use profilePicture from Firestore
+          photo: driverFromOrder.profilePicture || driverFromOrder.profileImage || driverFromOrder.photo || '',
+          phone: driverFromOrder.phone || '',
+          location: {
+            latitude: driverFromOrder.location?.lat || -26.2041,
+            longitude: driverFromOrder.location?.lng || 28.0473
+          }
+        };
+        setDriverInfo(mappedDriver);
+        setIsDriverLoading(false);
+      }
+      // DO NOT query drivers collection directly - driver info must come from order document
+
+      // Show arrival alert
+      if (newStatus === 'arrived' && !hasShownArrivalAlert) {
+        setShowArrivalAlert(true);
+        setHasShownArrivalAlert(true);
+        setStatusText('Your driver has arrived');
+        setTimeout(() => setShowArrivalAlert(false), 5000);
+      }
+
+      // Handle trip in progress (NOT 'started')
+      if (newStatus === 'in_progress') {
+        setStatusText(getStatusDisplayText('in_progress', order.serviceType));
+      }
+
+      // Handle completion - detach listener
+      if (newStatus === 'completed') {
+        if (gpsListenerRef.current) {
+          gpsListenerRef.current();
+          gpsListenerRef.current = null;
+        }
+        setStatusText(getStatusDisplayText('completed', order.serviceType));
+        setTimeout(() => setIsRatingModalOpen(true), 2000);
+        return; // Listener will be cleaned up by useEffect cleanup
+      }
+
+      // Handle cancellation - detach listener
+      if (newStatus === 'cancelled') {
+        if (gpsListenerRef.current) {
+          gpsListenerRef.current();
+          gpsListenerRef.current = null;
+        }
+        setStatusText('Ride cancelled');
+        return; // Listener will be cleaned up by useEffect cleanup
+      }
+
+      // Start GPS listener when driver is assigned
+      const driverIdForGps = ((order as any).driverSnapshot?.uid || (order as any).driverSnapshot?.id || (order as any).driver?.id);
+      if ((newStatus === 'accepted' || newStatus === 'arriving') && driverIdForGps && !gpsListenerRef.current) {
+        gpsListenerRef.current = listenToDriverLocation(driverIdForGps, (driverLoc) => {
+          const currentStatus = rideStatus;
+
+          if (currentStatus === 'accepted' || currentStatus === 'arriving') {
+            const pickupCoords = { 
+              latitude: order.pickup?.lat || -26.2041, 
+              longitude: order.pickup?.lng || 28.0473 
+            };
+            const etaMinutes = calculateETA(driverLoc, pickupCoords);
+            setStatusText(`Arriving in ${etaMinutes} min${etaMinutes !== 1 ? 's' : ''}`);
+          } else if (currentStatus === 'in_progress') {
+            const destinationCoords = { 
+              latitude: order.dropoff?.lat || -26.195, 
+              longitude: order.dropoff?.lng || 28.04 
+            };
+            const etaMinutes = calculateETA(driverLoc, destinationCoords);
+            setStatusText(`On trip - ETA ${etaMinutes} min${etaMinutes !== 1 ? 's' : ''}`);
+          }
+        });
+      }
+    });
+
+    orderListenerRef.current = unsubscribe;
+
+    return () => {
+      if (orderListenerRef.current) {
+        orderListenerRef.current();
+        orderListenerRef.current = null;
+      }
+      if (gpsListenerRef.current) {
+        gpsListenerRef.current();
+        gpsListenerRef.current = null;
+      }
+    };
+  }, [orderId, hasShownArrivalAlert, driverInfo, rideStatus]);
+
+  const handleMessageDriver = async () => {
+    setIsMessagePanelOpen(true);
+    await markMessagesAsRead();
+  };
+
+  const handleCancelClick = () => setShowCancelConfirmation(true);
+  const handleWaitForDriver = () => setShowCancelConfirmation(false);
+
+  const handleConfirmCancel = async () => {
+    try {
+      const orderIdToCancel = orderId || currentRide?.id || currentRideId;
+      if (!orderIdToCancel) return;
+
+      // Use unified cancel order service
+      await cancelOrder(orderIdToCancel, 'User cancelled ride');
+      
+      setShowCancelConfirmation(false);
+
+      // Clear localStorage
+      localStorage.removeItem('currentOrderId');
+      localStorage.removeItem('currentOrderType');
+
+      navigate('/what-went-wrong', {
+        state: {
+          orderId: orderIdToCancel,
+          userId: profile?.id || 'user123',
+          userName: profile?.name || 'Unknown User',
+          destination: finalDestination,
+          pickup: finalPickup,
+          stops: finalStops,
+          carType: finalCarType,
+          price: finalPrice
+        }
+      });
+    } catch (error) {
+      console.error('Error cancelling order:', error);
+      setShowCancelConfirmation(false);
+    }
+  };
+
+  const isMessageDisabled = rideStatus === 'pending' || rideStatus === 'completed';
+
+  return (
+    <div className="min-h-screen relative overflow-hidden">
+      <MapBackground />
+
+      {/* Arrival Alert */}
+      <AnimatePresence>
+        {showArrivalAlert && (
+          <motion.div
+            className="fixed top-4 left-4 right-4 bg-[#5B2EFF] text-white p-4 rounded-xl shadow-lg z-50"
+            initial={{ y: -100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -100, opacity: 0 }}
+          >
+            <p className="font-semibold text-center">Your driver has arrived!</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <DraggablePanel initialHeight={500} maxHeight={680} minHeight={175}>
+        <div className="space-y-6 pb-6">
+          <motion.div className="text-center pt-4" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">{statusText}</h2>
+          </motion.div>
+
+          {/* Driver Card - with skeleton loading and slide-up animation */}
+          <AnimatePresence mode="wait">
+            {isDriverLoading ? (
+              <DriverCardSkeleton key="skeleton" />
+            ) : driverInfo && (
+              <motion.div 
+                key="driver-card"
+                className="bg-gray-50 rounded-2xl p-4" 
+                initial={{ opacity: 0, y: 50, scale: 0.95 }} 
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ type: 'spring', damping: 20, stiffness: 200 }}
+              >
+                <div className="flex items-center space-x-4">
+                  {/* Driver Profile Picture - from profilePicture field */}
+                  <div className="relative">
+                    {driverInfo.photo ? (
+                      <img 
+                        src={driverInfo.photo} 
+                        alt={driverInfo.name}
+                        className="w-16 h-16 rounded-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-16 h-16 bg-gradient-to-br from-amber-400 to-orange-500 rounded-full flex items-center justify-center text-2xl">
+                        {driverInfo.name?.charAt(0) || '?'}
+                      </div>
+                    )}
+                    {/* Star Rating Badge */}
+                    <div className="absolute -bottom-1 -right-1 bg-white rounded-full px-1.5 py-0.5 shadow-md flex items-center space-x-0.5">
+                      <span className="text-amber-500 text-xs">&#9733;</span>
+                      <span className="text-xs font-medium text-gray-800">{driverInfo.rating?.toFixed(1) || '0.0'}</span>
+                    </div>
+                  </div>
+                  
+                  <div className="flex-1">
+                    {/* Plate Number */}
+                    <h3 className="font-bold text-lg text-gray-900">{driverInfo.plateNumber || 'Unknown'}</h3>
+                    {/* Car Model (color brand model) */}
+                    <p className="text-gray-600">{driverInfo.carModel || 'Vehicle'}</p>
+                    {/* Driver Name (firstName) */}
+                    <p className="text-gray-900 font-medium">{driverInfo.name || 'Driver'}</p>
+                  </div>
+                  
+                  {/* Car Image - from carImage field */}
+                  {driverInfo.carImage ? (
+                    <img 
+                      src={driverInfo.carImage} 
+                      alt="Vehicle"
+                      className="w-16 h-12 rounded-lg object-cover"
+                    />
+                  ) : (
+                    <div className="text-3xl">🚗</div>
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Cancel + Message Row */}
+          <motion.div className="bg-gray-50 rounded-xl p-4">
+            <div className="flex items-center justify-between">
+              {rideStatus !== 'arrived' && rideStatus !== 'in_progress' && (
+                <button onClick={handleCancelClick} className="text-sm text-red-600 font-medium hover:text-red-700 transition-colors">
+                  Cancel ride
+                </button>
+              )}
+              <motion.p
+                animate={{
+                  scale: [1, 1.05, 1],
+                  textShadow: [
+                    '0 0 0px rgba(147, 51, 234, 0)',
+                    '0 0 20px rgba(147, 51, 234, 0.8)',
+                    '0 0 0px rgba(147, 51, 234, 0)'
+                  ]
+                }}
+                transition={{ repeat: Infinity, duration: 1, repeatDelay: 4 }}
+                className={`text-sm text-gray-700 text-center ${rideStatus === 'arrived' || rideStatus === 'in_progress' ? 'flex-1 text-left' : 'flex-1'}`}
+              >
+                Tap the message icon to chat with your driver
+              </motion.p>
+              <motion.button
+                onClick={handleMessageDriver}
+                disabled={isMessageDisabled}
+                whileTap={{ scale: 0.9 }}
+                whileHover={{ scale: 1.05 }}
+                className={`relative p-2 rounded-full transition-colors ${isMessageDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-200'}`}
+              >
+                <MessageCircle className={`${isMessageDisabled ? 'text-gray-400' : 'text-gray-700'}`} size={24} />
+                {unreadMessageCount > 0 && !isMessageDisabled && (
+                  <motion.span
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center font-bold shadow-lg"
+                  >
+                    {unreadMessageCount}
+                  </motion.span>
+                )}
+              </motion.button>
+            </div>
+          </motion.div>
+
+          <ScrollableSection maxHeight="max-h-[420px]">
+            <div className="space-y-6 pb-4">
+              {isFood ? (
+                <>
+                  {/* Food Order Details */}
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <h3 className="font-semibold text-gray-900 mb-3">Food Items</h3>
+                    <div className="bg-gray-50 rounded-xl p-4">
+                      <div className="space-y-2 max-h-40 overflow-y-auto">
+                        {(foodOrderDetails?.items || orderData?.items || []).map((item: any, idx: number) => (
+                          <div key={idx} className="flex justify-between text-sm">
+                            <span className="text-gray-700">{item.name}</span>
+                            <span className="font-medium text-gray-900">R {item.price}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </motion.div>
+
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <h3 className="font-semibold text-gray-900 mb-3">Delivery route</h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-3 h-3 bg-[#5B2EFF] rounded-full"></div>
+                        <span className="flex-1 text-gray-700">{finalPickup}</span>
+                      </div>
+
+                      {finalStops.length > 0 && finalStops.map((stop: any, index: number) => (
+                        <div key={index} className="flex items-center space-x-3 ml-6">
+                          <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                          <span className="flex-1 text-gray-700">{stop.address || stop}</span>
+                        </div>
+                      ))}
+
+                      <div className="flex items-center space-x-3">
+                        <MapPin className="text-blue-600" size={12} />
+                        <span className="flex-1 text-gray-700">{finalDestination}</span>
+                      </div>
+                    </div>
+                  </motion.div>
+
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <h3 className="font-semibold text-gray-900 mb-3">Payment summary</h3>
+                    <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Food subtotal</span>
+                        <span className="font-medium text-gray-900">R {foodOrderDetails?.foodSubtotal || orderData?.foodSubtotal || 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Delivery fee</span>
+                        <span className="font-medium text-gray-900">R {foodOrderDetails?.deliveryFee || orderData?.deliveryFee || 0}</span>
+                      </div>
+                      <div className="flex justify-between pt-2 border-t border-gray-200">
+                        <span className="font-semibold text-gray-900">Total</span>
+                        <span className="text-lg font-bold text-gray-900">R {finalPrice}</span>
+                      </div>
+                    </div>
+                  </motion.div>
+                </>
+              ) : (
+                <>
+                  {/* Ride Details */}
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <h3 className="font-semibold text-gray-900 mb-3">My route</h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center space-x-3">
+                        <div className="w-3 h-3 bg-[#5B2EFF] rounded-full"></div>
+                        <span className="flex-1 text-gray-700">{finalPickup}</span>
+                        <Edit className="text-gray-400" size={16} />
+                      </div>
+
+                      {finalStops.map((stop: string, index: number) => (
+                        <div key={index} className="flex items-center space-x-3 ml-6">
+                          <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                          <span className="flex-1 text-gray-700">{stop}</span>
+                          <Edit className="text-gray-400" size={16} />
+                        </div>
+                      ))}
+
+                      <div className="flex items-center space-x-3 ml-6">
+                        <Plus className="text-blue-600" size={16} />
+                        <span className="text-blue-600 font-medium">Add stop</span>
+                      </div>
+
+                      <div className="flex items-center space-x-3">
+                        <MapPin className="text-blue-600" size={12} />
+                        <span className="flex-1 text-gray-700">{finalDestination}</span>
+                        <Edit className="text-gray-400" size={16} />
+                      </div>
+                    </div>
+                  </motion.div>
+
+                  <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <h3 className="font-semibold text-gray-900 mb-3">Payment method</h3>
+                    <div className="bg-gray-50 rounded-xl p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-3">
+                          <CreditCard className="text-green-600" size={20} />
+                          <div>
+                            <p className="font-medium text-gray-900">Cash</p>
+                            <p className="text-sm text-gray-500">Fare - {finalCarType}</p>
+                          </div>
+                        </div>
+                        <span className="font-bold text-gray-900">R {finalPrice}</span>
+                      </div>
+                    </div>
+                  </motion.div>
+                </>
+              )}
+            </div>
+          </ScrollableSection>
+        </div>
+      </DraggablePanel>
+
+      {/* Cancel Confirmation Modal */}
+      <AnimatePresence>
+        {showCancelConfirmation && (
+          <motion.div
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="bg-white rounded-3xl p-6 max-w-sm w-full relative"
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+            >
+              <button
+                onClick={handleWaitForDriver}
+                className="absolute top-4 right-4 w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center hover:bg-gray-300"
+              >
+                <X size={20} className="text-gray-600" />
+              </button>
+
+              <div className="text-center mb-6">
+                <div className="relative inline-block">
+                  <div className="w-24 h-24 bg-pink-100 rounded-full flex items-center justify-center mb-4">
+                    <span className="text-4xl">👨🏽‍💼</span>
+                  </div>
+                  <div className="absolute -bottom-2 -right-2 w-8 h-8 bg-red-500 rounded-full flex items-center justify-center">
+                    <X size={16} className="text-white" />
+                  </div>
+                </div>
+              </div>
+
+              <h3 className="text-2xl font-bold text-gray-900 mb-4 text-center">Are you sure?</h3>
+              <p className="text-gray-600 text-center mb-8 leading-relaxed">
+                Do you really want to cancel the ride? Rebooking may not get you there faster.
+              </p>
+
+              <div className="space-y-3">
+                <button
+                  onClick={handleConfirmCancel}
+                  className="w-full bg-red-500 text-white py-4 rounded-2xl font-semibold text-lg hover:bg-red-600"
+                >
+                  Cancel ride
+                </button>
+                <button
+                  onClick={handleWaitForDriver}
+                  className="w-full bg-gray-100 text-gray-800 py-4 rounded-2xl font-semibold text-lg hover:bg-gray-200"
+                >
+                  Wait for driver
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <MessagePanel
+        isOpen={isMessagePanelOpen}
+        onClose={() => setIsMessagePanelOpen(false)}
+        rideId={orderId || ''}
+        currentUserId={profile?.id || 'user123'}
+        currentUserName={profile?.name || 'Client'}
+        driverId={firestoreRideData?.driverId || (isFood ? foodOrderDetails?.driverId : currentRide?.driverId) || 'driver123'}
+        driverName={driverInfo?.name || 'Driver'}
+        isRideActive
+      />
+
+      <RatingModal
+        isOpen={isRatingModalOpen}
+        onClose={() => {
+          setIsRatingModalOpen(false);
+          localStorage.removeItem('currentOrderId');
+          localStorage.removeItem('currentOrderType');
+          navigate('/');
+        }}
+        path={isFood ? 'store_delivery' : 'direct_trip'}
+        driverName={driverInfo?.name || 'Driver'}
+        driverPhoto={driverInfo?.photo || ''}
+        driverId={driverInfo?.id || firestoreRideData?.driverId || ''}
+        orderId={orderId || ''}
+        storeName={isFood ? (foodOrderDetails?.storeName || orderData?.storeName || 'Store') : undefined}
+        storeImage={isFood ? (foodOrderDetails?.storeImage || orderData?.storeImage || '') : undefined}
+        storeId={isFood ? (foodOrderDetails?.storeId || orderData?.storeId || '') : undefined}
+      />
+    </div>
+  );
+};
